@@ -1,0 +1,63 @@
+# AutoHeal agent configuration.
+#
+# Linux:  /etc/autoheal/agent.yaml
+# macOS:  /usr/local/etc/autoheal/agent.yaml
+#
+# The API address and the credential are not set here. They come from
+# `autoheal-agent enroll` and are kept in the state folder.
+
+# Optional. Without it the agent keeps the name given to its enrollment token,
+# or else its hostname.
+# name: web-01
+
+# Optional. Every check is reported as "<host_prefix>:<name>", so two agents in
+# one environment never share an incident. The default is the hostname,
+# lowercased, with other characters replaced by "-".
+# host_prefix: web-01
+
+# Holds the credential and the spool of events waiting to be sent. It must be
+# readable only by the agent's user.
+# state_dir: /var/lib/autoheal-agent
+
+# Optional. A PEM file of extra certificate authorities to trust, added to the
+# system's own, for an AutoHeal address or checks behind an internal CA.
+# ca_file: /etc/ssl/internal-ca.pem
+
+# debug, info, warn or error. Logs go to standard error as JSON.
+log_level: info
+
+# Events wait here while AutoHeal cannot be reached. When it is full the oldest
+# events are dropped.
+spool:
+  max_events: 10000
+  max_mb: 20
+
+# Host health: CPU, memory and disks, each up, degraded or down by percent used.
+host:
+  # enabled: false
+  interval: 60s
+  cpu: { degraded: 85, down: 95 }
+  memory: { degraded: 85, down: 95 }
+  disks:
+    - { name: root, path: /, degraded: 85, down: 95 }
+
+# HTTP and TCP checks, at most 50. Names may hold letters, digits and . _ -,
+# up to 59 characters, and must not start with "host.".
+#
+# A check is down when it fails, degraded when slower than `slow`, and up
+# otherwise. A down result is an error unless `down_severity: critical`, which
+# makes AutoHeal investigate it automatically and email members.
+checks:
+  - name: api
+    http:
+      url: "http://127.0.0.1:8080/health"
+      expect_status: [200]
+    interval: 30s
+    timeout: 5s
+    slow: 1s
+
+  - name: postgres
+    tcp:
+      address: "127.0.0.1:5432"
+    interval: 30s
+    timeout: 3s

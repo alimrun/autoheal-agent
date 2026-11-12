@@ -1,0 +1,3 @@
+dist/
+/autoheal-agent
+*.tmp

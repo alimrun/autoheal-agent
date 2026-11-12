@@ -1,0 +1,36 @@
+# AutoHeal agent (systemd). Install to /etc/systemd/system/autoheal-agent.service,
+# then: sudo systemctl daemon-reload && sudo systemctl enable --now autoheal-agent
+#
+# The agent only reads host metrics, runs its configured HTTP and TCP checks
+# and sends the results to AutoHeal. It never starts a process.
+
+[Unit]
+Description=AutoHeal agent
+Documentation=https://github.com/alimrun/autoheal-agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=autoheal-agent
+Group=autoheal-agent
+ExecStart=/usr/local/bin/autoheal-agent run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+
+# /var/lib/autoheal-agent, owned by the service user, mode 0700.
+StateDirectory=autoheal-agent
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/autoheal-agent
+
+# Defense in depth.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

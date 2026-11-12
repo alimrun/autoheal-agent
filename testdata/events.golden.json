@@ -1,0 +1,281 @@
+[
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000001",
+    "type": "health_check",
+    "severity": "info",
+    "occurred_at": "2026-11-11T10:00:00.000Z",
+    "message": "web-01:host.cpu is up: 42% CPU used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "cpu",
+      "value_percent": 42.4
+    },
+    "body": {
+      "name": "web-01:host.cpu",
+      "status": "up"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000002",
+    "type": "health_check",
+    "severity": "warning",
+    "occurred_at": "2026-11-11T10:00:01.000Z",
+    "message": "web-01:host.cpu is degraded: 88% CPU used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "cpu",
+      "value_percent": 88
+    },
+    "body": {
+      "name": "web-01:host.cpu",
+      "status": "degraded"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000003",
+    "type": "health_check",
+    "severity": "error",
+    "occurred_at": "2026-11-11T10:00:02.000Z",
+    "message": "web-01:host.cpu is down: 98% CPU used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "cpu",
+      "value_percent": 97.5
+    },
+    "body": {
+      "name": "web-01:host.cpu",
+      "status": "down"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000004",
+    "type": "health_check",
+    "severity": "info",
+    "occurred_at": "2026-11-11T10:00:03.000Z",
+    "message": "web-01:host.memory is up: 61% memory used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "memory",
+      "value_percent": 61.3
+    },
+    "body": {
+      "name": "web-01:host.memory",
+      "status": "up"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000005",
+    "type": "health_check",
+    "severity": "warning",
+    "occurred_at": "2026-11-11T10:00:04.000Z",
+    "message": "web-01:host.memory is degraded: 91% memory used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "memory",
+      "value_percent": 90.6
+    },
+    "body": {
+      "name": "web-01:host.memory",
+      "status": "degraded"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000006",
+    "type": "health_check",
+    "severity": "error",
+    "occurred_at": "2026-11-11T10:00:05.000Z",
+    "message": "web-01:host.memory is down: 98% memory used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "memory",
+      "value_percent": 98
+    },
+    "body": {
+      "name": "web-01:host.memory",
+      "status": "down"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000007",
+    "type": "health_check",
+    "severity": "info",
+    "occurred_at": "2026-11-11T10:00:06.000Z",
+    "message": "web-01:host.disk.root is up: 61% of / used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "disk",
+      "value_percent": 61.3
+    },
+    "body": {
+      "name": "web-01:host.disk.root",
+      "status": "up"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000008",
+    "type": "health_check",
+    "severity": "warning",
+    "occurred_at": "2026-11-11T10:00:07.000Z",
+    "message": "web-01:host.disk.root is degraded: 91% of / used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "disk",
+      "value_percent": 90.6
+    },
+    "body": {
+      "name": "web-01:host.disk.root",
+      "status": "degraded"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000009",
+    "type": "health_check",
+    "severity": "error",
+    "occurred_at": "2026-11-11T10:00:08.000Z",
+    "message": "web-01:host.disk.root is down: 98% of / used",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "disk",
+      "value_percent": 98
+    },
+    "body": {
+      "name": "web-01:host.disk.root",
+      "status": "down"
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000010",
+    "type": "health_check",
+    "severity": "error",
+    "occurred_at": "2026-11-11T10:00:09.000Z",
+    "message": "web-01:api is down: status 503",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "http",
+      "target": "https://127.0.0.1:8443/health"
+    },
+    "body": {
+      "name": "web-01:api",
+      "status": "down",
+      "latency_ms": 12
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000011",
+    "type": "health_check",
+    "severity": "warning",
+    "occurred_at": "2026-11-11T10:00:10.000Z",
+    "message": "web-01:api is degraded: status 200 in 1450 ms, slower than 1000 ms",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "http",
+      "target": "https://127.0.0.1:8443/health"
+    },
+    "body": {
+      "name": "web-01:api",
+      "status": "degraded",
+      "latency_ms": 1450
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000012",
+    "type": "health_check",
+    "severity": "info",
+    "occurred_at": "2026-11-11T10:00:11.000Z",
+    "message": "web-01:api is up: status 200 in 38 ms",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "http",
+      "target": "https://127.0.0.1:8443/health"
+    },
+    "body": {
+      "name": "web-01:api",
+      "status": "up",
+      "latency_ms": 38
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000013",
+    "type": "health_check",
+    "severity": "error",
+    "occurred_at": "2026-11-11T10:00:12.000Z",
+    "message": "web-01:postgres is down: connection refused",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "tcp",
+      "target": "127.0.0.1:5432"
+    },
+    "body": {
+      "name": "web-01:postgres",
+      "status": "down",
+      "latency_ms": 2
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000014",
+    "type": "health_check",
+    "severity": "warning",
+    "occurred_at": "2026-11-11T10:00:13.000Z",
+    "message": "web-01:postgres is degraded: connected in 740 ms, slower than 500 ms",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "tcp",
+      "target": "127.0.0.1:5432"
+    },
+    "body": {
+      "name": "web-01:postgres",
+      "status": "degraded",
+      "latency_ms": 740
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000015",
+    "type": "health_check",
+    "severity": "info",
+    "occurred_at": "2026-11-11T10:00:14.000Z",
+    "message": "web-01:postgres is up: connected in 3 ms",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "tcp",
+      "target": "127.0.0.1:5432"
+    },
+    "body": {
+      "name": "web-01:postgres",
+      "status": "up",
+      "latency_ms": 3
+    }
+  },
+  {
+    "schema_version": 1,
+    "event_id": "01JCGG00000000000000000016",
+    "type": "health_check",
+    "severity": "critical",
+    "occurred_at": "2026-11-11T10:00:15.000Z",
+    "message": "web-01:payments is down: status 503",
+    "context": {
+      "agent_version": "0.1.0",
+      "kind": "http",
+      "target": "https://127.0.0.1:9443/ready"
+    },
+    "body": {
+      "name": "web-01:payments",
+      "status": "down",
+      "latency_ms": 25
+    }
+  }
+]

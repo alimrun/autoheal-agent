@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AutoHeal agent (launchd). Install to /Library/LaunchDaemons/com.autoheal.agent.plist
+  (owner root:wheel, mode 0644), then:
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.autoheal.agent.plist
+
+  The agent only reads host metrics, runs its configured HTTP and TCP checks
+  and sends the results to AutoHeal. It never starts a process.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.autoheal.agent</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/autoheal-agent</string>
+		<string>run</string>
+		<string>--config</string>
+		<string>/usr/local/etc/autoheal/agent.yaml</string>
+	</array>
+
+	<key>UserName</key>
+	<string>autoheal-agent</string>
+	<key>GroupName</key>
+	<string>autoheal-agent</string>
+
+	<key>RunAtLoad</key>
+	<true/>
+
+	<!-- Restart after a crash or a non-zero exit, not after a clean stop. -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>ExitTimeOut</key>
+	<integer>15</integer>
+
+	<key>Umask</key>
+	<integer>63</integer>
+
+	<key>StandardOutPath</key>
+	<string>/usr/local/var/log/autoheal-agent.log</string>
+	<key>StandardErrorPath</key>
+	<string>/usr/local/var/log/autoheal-agent.log</string>
+</dict>
+</plist>
