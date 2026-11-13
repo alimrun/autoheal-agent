@@ -3,16 +3,20 @@ package config
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,10 +25,12 @@ import (
 )
 
 const (
-	MaxChecks         = 50
-	MaxCheckNameRunes = 59
-	MaxPrefixRunes    = 40
-	MinInterval       = 10 * time.Second
+	MaxChecks          = 50
+	MaxCheckNameRunes  = 59
+	MaxPrefixRunes     = 40
+	MinInterval        = 10 * time.Second
+	DefaultHookTimeout = 30 * time.Second
+	MaxHookTimeout     = 120 * time.Second
 )
 
 var (
@@ -33,17 +39,21 @@ var (
 	prefixPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,40}$`)
 	prefixInvalid    = regexp.MustCompile(`[^a-z0-9._-]`)
 	dashRuns         = regexp.MustCompile(`-{2,}`)
+	keyIDPattern     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+	// TargetPattern is the recovery protocol's pattern for a task target.
+	TargetPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@-]{0,99}$`)
 )
 
 type Config struct {
-	Name       string  `yaml:"name"`
-	HostPrefix string  `yaml:"host_prefix"`
-	StateDir   string  `yaml:"state_dir"`
-	CAFile     string  `yaml:"ca_file"`
-	LogLevel   string  `yaml:"log_level"`
-	Spool      Spool   `yaml:"spool"`
-	Host       Host    `yaml:"host"`
-	Checks     []Check `yaml:"checks"`
+	Name       string   `yaml:"name"`
+	HostPrefix string   `yaml:"host_prefix"`
+	StateDir   string   `yaml:"state_dir"`
+	CAFile     string   `yaml:"ca_file"`
+	LogLevel   string   `yaml:"log_level"`
+	Spool      Spool    `yaml:"spool"`
+	Host       Host     `yaml:"host"`
+	Checks     []Check  `yaml:"checks"`
+	Recovery   Recovery `yaml:"recovery"`
 
 	// Path is the file the configuration was read from.
 	Path string `yaml:"-"`
@@ -91,6 +101,60 @@ type HTTPCheck struct {
 
 type TCPCheck struct {
 	Address string `yaml:"address"`
+}
+
+// Recovery lets AutoHeal ask this agent for the two actions declared here. It is off by default.
+type Recovery struct {
+	Enabled      bool            `yaml:"enabled"`
+	PlatformKeys []PlatformKey   `yaml:"platform_keys"`
+	Actions      RecoveryActions `yaml:"actions"`
+}
+
+// PlatformKey is an Ed25519 public key AutoHeal signs recovery tasks with.
+type PlatformKey struct {
+	ID        string `yaml:"id"`
+	PublicKey string `yaml:"public_key"`
+}
+
+// Decode returns the 32-byte public key.
+func (key PlatformKey) Decode() (ed25519.PublicKey, error) {
+	decoded, err := base64.StdEncoding.DecodeString(key.PublicKey)
+	if err != nil || len(decoded) != ed25519.PublicKeySize {
+		return nil, errors.New("must be a base64 Ed25519 public key of 32 bytes")
+	}
+	return ed25519.PublicKey(decoded), nil
+}
+
+type RecoveryActions struct {
+	RecheckHealth RecheckHealth `yaml:"recheck_health"`
+	ClearCache    ClearCache    `yaml:"clear_cache"`
+}
+
+type RecheckHealth struct {
+	Checks []string `yaml:"checks"`
+}
+
+type ClearCache struct {
+	Hooks []Hook `yaml:"hooks"`
+}
+
+type Hook struct {
+	Name      string   `yaml:"name"`
+	URL       string   `yaml:"url"`
+	TokenFile string   `yaml:"token_file"`
+	Timeout   Duration `yaml:"timeout"`
+}
+
+// EnabledActions lists the recovery actions with at least one target, in protocol order.
+func (recovery Recovery) EnabledActions() []string {
+	var actions []string
+	if len(recovery.Actions.RecheckHealth.Checks) > 0 {
+		actions = append(actions, "recheck_health")
+	}
+	if len(recovery.Actions.ClearCache.Hooks) > 0 {
+		actions = append(actions, "clear_cache")
+	}
+	return actions
 }
 
 // Duration reads Go duration strings such as "30s".
@@ -250,6 +314,27 @@ func (config *Config) applyDefaults() {
 			check.DownSeverity = "error"
 		}
 	}
+	for index := range config.Recovery.Actions.ClearCache.Hooks {
+		hook := &config.Recovery.Actions.ClearCache.Hooks[index]
+		if hook.Timeout.Duration == 0 {
+			hook.Timeout.Duration = DefaultHookTimeout
+		}
+	}
+}
+
+// LocalCheckNames lists every check this agent runs, without the host prefix.
+func (config *Config) LocalCheckNames() []string {
+	var names []string
+	if config.HostEnabled() {
+		names = append(names, "host.cpu", "host.memory")
+		for _, disk := range config.Host.Disks {
+			names = append(names, "host.disk."+disk.Name)
+		}
+	}
+	for _, check := range config.Checks {
+		names = append(names, check.Name)
+	}
+	return names
 }
 
 func defaultThreshold(degraded, down *float64) {
@@ -373,6 +458,7 @@ func (validator *validator) validate(config *Config) {
 
 	validator.validateHost(config)
 	validator.validateChecks(config.Checks)
+	validator.validateRecovery(config)
 }
 
 func (validator *validator) validateCAFile(path string) {
@@ -488,4 +574,105 @@ func (validator *validator) validateTCP(check *TCPCheck, position string) {
 	if err != nil || host == "" || portErr != nil || number < 1 || number > 65535 {
 		validator.add("must be host:port", "checks", position, "tcp", "address")
 	}
+}
+
+func (validator *validator) validateRecovery(config *Config) {
+	recovery := config.Recovery
+
+	seenKeys := map[string]bool{}
+	for index, key := range recovery.PlatformKeys {
+		position := strconv.Itoa(index)
+		switch {
+		case !keyIDPattern.MatchString(key.ID):
+			validator.add("key IDs may hold only letters, digits and . _ -, up to 64 characters", "recovery", "platform_keys", position, "id")
+		case seenKeys[key.ID]:
+			validator.add(fmt.Sprintf("%q is used by another key", key.ID), "recovery", "platform_keys", position, "id")
+		}
+		seenKeys[key.ID] = true
+		if _, err := key.Decode(); err != nil {
+			validator.add(err.Error(), "recovery", "platform_keys", position, "public_key")
+		}
+	}
+
+	local := config.LocalCheckNames()
+	seenChecks := map[string]bool{}
+	for index, name := range recovery.Actions.RecheckHealth.Checks {
+		position := strconv.Itoa(index)
+		switch {
+		case !slices.Contains(local, name):
+			validator.add(fmt.Sprintf("%q is not a check this agent runs", name), "recovery", "actions", "recheck_health", "checks", position)
+		case seenChecks[name]:
+			validator.add(fmt.Sprintf("%q is listed twice", name), "recovery", "actions", "recheck_health", "checks", position)
+		}
+		seenChecks[name] = true
+	}
+
+	seenHooks := map[string]bool{}
+	for index, hook := range recovery.Actions.ClearCache.Hooks {
+		position := strconv.Itoa(index)
+		switch {
+		case !TargetPattern.MatchString(hook.Name):
+			validator.add("hook names must start with a letter or digit and may hold only letters, digits and . _ : @ -, up to 100 characters", "recovery", "actions", "clear_cache", "hooks", position, "name")
+		case seenHooks[hook.Name]:
+			validator.add(fmt.Sprintf("%q is used by another hook", hook.Name), "recovery", "actions", "clear_cache", "hooks", position, "name")
+		}
+		seenHooks[hook.Name] = true
+		validator.validateHook(hook, position)
+	}
+
+	if !recovery.Enabled {
+		return
+	}
+	if len(recovery.PlatformKeys) == 0 {
+		validator.add("recovery is enabled but no platform public key is listed; add the key ID and public key your AutoHeal server printed when its signing key was generated", "recovery", "platform_keys")
+	}
+	if len(recovery.EnabledActions()) == 0 {
+		validator.add("recovery is enabled but no action has a target; list a check under recheck_health or a hook under clear_cache", "recovery", "actions")
+	}
+}
+
+func (validator *validator) validateHook(hook Hook, position string) {
+	parsed, err := url.Parse(hook.URL)
+	switch {
+	case err != nil || parsed.Host == "":
+		validator.add("must be a full http or https URL", "recovery", "actions", "clear_cache", "hooks", position, "url")
+	case parsed.Scheme != "http" && parsed.Scheme != "https":
+		validator.add("must use http or https", "recovery", "actions", "clear_cache", "hooks", position, "url")
+	case parsed.User != nil || parsed.Fragment != "":
+		validator.add("must not contain a user name, password or fragment", "recovery", "actions", "clear_cache", "hooks", position, "url")
+	case !IsLoopbackHost(parsed.Hostname()):
+		validator.add("hooks must use a loopback address: localhost, 127.0.0.0/8 or ::1", "recovery", "actions", "clear_cache", "hooks", position, "url")
+	}
+
+	if hook.TokenFile != "" {
+		validator.validateTokenFile(hook.TokenFile, position)
+	}
+	if hook.Timeout.Duration < time.Second || hook.Timeout.Duration > MaxHookTimeout {
+		validator.add("must be between 1s and 120s", "recovery", "actions", "clear_cache", "hooks", position, "timeout")
+	}
+}
+
+func (validator *validator) validateTokenFile(path, position string) {
+	if !filepath.IsAbs(path) {
+		validator.add("must be an absolute path", "recovery", "actions", "clear_cache", "hooks", position, "token_file")
+		return
+	}
+	info, err := os.Stat(path)
+	switch {
+	case err != nil:
+		validator.add("cannot be read: "+err.Error(), "recovery", "actions", "clear_cache", "hooks", position, "token_file")
+	case !info.Mode().IsRegular():
+		validator.add("must be a regular file", "recovery", "actions", "clear_cache", "hooks", position, "token_file")
+	case info.Mode().Perm()&0o077 != 0:
+		validator.add(fmt.Sprintf("can be read by other users (mode %04o); run: chmod 600 %s", info.Mode().Perm(), path), "recovery", "actions", "clear_cache", "hooks", position, "token_file")
+	}
+}
+
+// IsLoopbackHost reports whether host is localhost or a literal loopback address.
+func IsLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	address, err := netip.ParseAddr(host)
+	return err == nil && address.Unmap().IsLoopback()
 }

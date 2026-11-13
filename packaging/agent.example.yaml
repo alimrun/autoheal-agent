@@ -61,3 +61,42 @@ checks:
       address: "127.0.0.1:5432"
     interval: 30s
     timeout: 3s
+
+# Recovery (agent 0.2.0 and later), off by default. While it is off the agent
+# never asks AutoHeal for tasks.
+#
+# When it is on, AutoHeal can ask this agent for two actions, and only on the
+# targets listed here: run one of the checks above again (recheck_health), or
+# send one POST to a cache hook on this host (clear_cache). The agent acts only
+# on tasks signed by a key below, and still never starts a process.
+#
+# Turning it on needs at least one platform key and one action with a target.
+#
+# recovery:
+#   enabled: true
+#
+#   # The key ID and public key your AutoHeal server printed when its signing
+#   # key was generated (`php artisan recovery:generate-signing-key`). Only the
+#   # public key belongs here. List two keys while the server's key is rotated.
+#   platform_keys:
+#     - id: k1
+#       public_key: "<base64 Ed25519 public key>"
+#
+#   actions:
+#     # Checks AutoHeal may ask to run again, by the names used in this file
+#     # (host checks are "host.cpu", "host.memory" and "host.disk.<name>").
+#     recheck_health:
+#       checks: [api, postgres]
+#
+#     # Cache hooks. The URL must be on this host: localhost, 127.0.0.0/8 or
+#     # ::1. The agent sends POST with the body {"task_id": "..."}, follows no
+#     # redirect and ignores the answer's body; any 2xx status means done.
+#     #   token_file  optional; its content is sent as "Authorization: Bearer".
+#     #               It must be readable only by the agent's user (chmod 600).
+#     #   timeout     30s unless set; at most 120s.
+#     clear_cache:
+#       hooks:
+#         - name: views
+#           url: "http://127.0.0.1:8080/internal/cache/clear"
+#           token_file: /etc/autoheal/hooks/views.token
+#           timeout: 30s

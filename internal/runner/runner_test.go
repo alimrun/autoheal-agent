@@ -24,6 +24,7 @@ import (
 	"github.com/alimrun/autoheal-agent/internal/check"
 	"github.com/alimrun/autoheal-agent/internal/credential"
 	"github.com/alimrun/autoheal-agent/internal/event"
+	"github.com/alimrun/autoheal-agent/internal/recovery"
 	"github.com/alimrun/autoheal-agent/internal/runner"
 	"github.com/alimrun/autoheal-agent/internal/spool"
 )
@@ -32,7 +33,10 @@ const (
 	pathHeartbeat = "/api/v1/agent/heartbeat"
 	pathRotate    = "/api/v1/agent/credential/rotate"
 	pathTelemetry = "/api/v1/agent/telemetry/events"
-	allPaths      = "*"
+	pathTasks     = "/api/v1/agent/tasks"
+	// pathTaskResult stands for every task's result path in rules and recorded requests.
+	pathTaskResult = "/api/v1/agent/tasks/*/result"
+	allPaths       = "*"
 
 	initialToken = "token-0"
 	checkName    = "web-01:api"
@@ -55,6 +59,10 @@ func testOptions() runner.Options {
 		Refresh:           0,
 		QueueSize:         500,
 		CheckJitter:       0,
+
+		TaskPoll:            10 * time.Millisecond,
+		TaskPollUnsupported: 300 * time.Millisecond,
+		TaskReportWindow:    500 * time.Millisecond,
 	}
 }
 
@@ -79,6 +87,7 @@ type rule struct {
 }
 
 type request struct {
+	method   string
 	path     string
 	token    string
 	at       time.Time
@@ -91,8 +100,13 @@ type request struct {
 type rotation struct{ oldToken, newToken string }
 
 type sentEvent struct {
-	EventID string `json:"event_id"`
-	Message string `json:"message"`
+	EventID    string    `json:"event_id"`
+	Message    string    `json:"message"`
+	OccurredAt time.Time `json:"occurred_at"`
+	Body       struct {
+		Name   string `json:"name"`
+		Status string `json:"status"`
+	} `json:"body"`
 }
 
 type reply struct {
@@ -129,6 +143,9 @@ type fakePlatform struct {
 	requests           []request
 	stored             map[string]string // event_id -> message
 	duplicates         int
+	events             []sentEvent
+	heartbeats         []map[string]any
+	recovery           fakeRecovery
 }
 
 func newFakePlatform(t *testing.T) *fakePlatform {
@@ -142,6 +159,7 @@ func newFakePlatform(t *testing.T) *fakePlatform {
 		issuedTokens:      map[string]bool{},
 		savedBeforeUse:    map[string]bool{},
 		stored:            map[string]string{},
+		recovery:          fakeRecovery{unscoped: map[string]bool{}},
 	}
 	fake.server = httptest.NewServer(fake)
 	t.Cleanup(func() {
@@ -211,10 +229,17 @@ func (fake *fakePlatform) ServeHTTP(writer http.ResponseWriter, incoming *http.R
 		_ = json.Unmarshal(body, &payload)
 	}
 
+	if strings.HasPrefix(path, pathTasks+"/") {
+		path = pathTaskResult
+	}
+
 	fake.mu.Lock()
 	current := fake.take(path)
+	if path == pathTaskResult {
+		current = fake.recovery.modeFor(current, body)
+	}
 	fake.noteUse(token)
-	record := request{path: path, token: token, at: time.Now()}
+	record := request{method: incoming.Method, path: path, token: token, at: time.Now()}
 	for _, sent := range payload.Events {
 		record.ids = append(record.ids, sent.EventID)
 		record.counters = append(record.counters, counterOf(sent.Message))
@@ -232,7 +257,16 @@ func (fake *fakePlatform) ServeHTTP(writer http.ResponseWriter, incoming *http.R
 		}
 	case current == rateLimit:
 		answer = reply{status: http.StatusTooManyRequests, code: "http_429", message: "Too Many Attempts.", retryAfter: fake.retryAfter}
+	case path == pathTasks:
+		answer = fake.answerTasks(token)
+	case path == pathTaskResult:
+		answer = fake.answerTaskResult(token, incoming.URL.Path, body)
 	default:
+		if path == pathHeartbeat {
+			var sent map[string]any
+			_ = json.Unmarshal(body, &sent)
+			fake.heartbeats = append(fake.heartbeats, sent)
+		}
 		answer = fake.answer(path, token, payload.Events)
 	}
 	record.status = answer.status
@@ -299,6 +333,9 @@ func (fake *fakePlatform) answer(path, token string, events []sentEvent) reply {
 		issued := fmt.Sprintf("token-%d", fake.issued)
 		fake.valid[issued] = true
 		fake.issuedTokens[issued] = true
+		if fake.recovery.rotationKeepsScopeMissing {
+			fake.recovery.unscoped[issued] = true
+		}
 		if fake.revokeOnRotate {
 			delete(fake.valid, token)
 		}
@@ -315,6 +352,7 @@ func (fake *fakePlatform) answer(path, token string, events []sentEvent) reply {
 				continue
 			}
 			fake.stored[sent.EventID] = sent.Message
+			fake.events = append(fake.events, sent)
 			accepted++
 		}
 		fake.duplicates += duplicates
@@ -460,6 +498,8 @@ type harness struct {
 	log      *slog.Logger
 	client   *api.Client
 	details  api.Details
+	// recovery is nil while recovery is off, as it is by default.
+	recovery *recoverySetup
 }
 
 func newHarness(t *testing.T) *harness {
@@ -531,16 +571,21 @@ func (h *harness) start(options runner.Options, checks ...*check.Check) *running
 		h.t.Fatalf("loading the credential: %v", err)
 	}
 	opened := h.openSpool()
+	details, tasks := h.details, h.recovery.build(h)
+	if tasks != nil {
+		details.Recovery = &api.RecoveryCapability{Protocol: recovery.Protocol, Actions: h.recovery.policy.Actions()}
+	}
 	agent := runner.New(runner.Deps{
 		Options:    options,
 		Log:        h.log,
 		Client:     h.client,
 		StateDir:   h.stateDir,
-		Details:    h.details,
+		Details:    details,
 		Checks:     checks,
 		Spool:      opened,
 		Credential: loaded,
 		Stamp:      stamp,
+		Recovery:   tasks,
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())

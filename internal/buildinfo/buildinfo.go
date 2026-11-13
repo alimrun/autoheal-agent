@@ -8,7 +8,9 @@ import (
 	"strings"
 )
 
-// Set with -ldflags "-X github.com/alimrun/autoheal-agent/internal/buildinfo.Version=…".
+// Set with -ldflags "-X github.com/alimrun/autoheal-agent/internal/buildinfo.Version=…", as
+// `make build VERSION=…` and the release script do. The default marks a development build and
+// is not bumped by hand: the release that adds recovery tasks is the one tagged v0.2.0.
 var (
 	Version = "0.0.0-dev"
 	Commit  = "unknown"

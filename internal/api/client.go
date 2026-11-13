@@ -26,6 +26,7 @@ const (
 	pathHeartbeat  = "/agent/heartbeat"
 	pathRotate     = "/agent/credential/rotate"
 	pathTelemetry  = "/agent/telemetry/events"
+	pathTasks      = "/agent/tasks"
 )
 
 // ValidateBaseURL accepts HTTPS addresses, and plain HTTP only to a loopback host. The
@@ -133,6 +134,14 @@ type Details struct {
 	Version  string `json:"version"`
 	OS       string `json:"os"`
 	Arch     string `json:"arch"`
+	// Recovery is sent with heartbeats only, and only while recovery is on locally.
+	Recovery *RecoveryCapability `json:"recovery,omitempty"`
+}
+
+// RecoveryCapability names the protocol and the enabled actions, never their targets.
+type RecoveryCapability struct {
+	Protocol int      `json:"protocol"`
+	Actions  []string `json:"actions"`
 }
 
 type Ref struct {
@@ -178,14 +187,55 @@ type Accepted struct {
 	ServerTime time.Time `json:"-"`
 }
 
+// TaskEnvelope is one signed recovery task: the payload bytes and their signature, both base64.
+type TaskEnvelope struct {
+	KeyID     string `json:"key_id"`
+	Payload   string `json:"payload"`
+	Signature string `json:"signature"`
+}
+
+type Tasks struct {
+	Paused bool           `json:"paused"`
+	Tasks  []TaskEnvelope `json:"tasks"`
+}
+
+const (
+	StageReceived = "received"
+	StageRunning  = "running"
+	StageFinished = "finished"
+	StageFailed   = "failed"
+	StageRefused  = "refused"
+)
+
+type TaskReport struct {
+	Nonce      string        `json:"nonce"`
+	Stage      string        `json:"stage"`
+	ReasonCode string        `json:"reason_code,omitempty"`
+	Evidence   *TaskEvidence `json:"evidence,omitempty"`
+}
+
+// TaskEvidence is everything a report may say about a run. It never holds an answer body, a
+// hook address or a token.
+type TaskEvidence struct {
+	DurationMs  *int64 `json:"duration_ms,omitempty"`
+	Outcome     string `json:"outcome,omitempty"`
+	HTTPStatus  int    `json:"http_status,omitempty"`
+	CheckStatus string `json:"check_status,omitempty"`
+}
+
+type taskStatus struct {
+	Status string `json:"status"`
+}
+
 func (client *Client) Register(ctx context.Context, enrollmentToken string, details Details) (*Registration, error) {
+	details.Recovery = nil
 	body := struct {
 		EnrollmentToken string `json:"enrollment_token"`
 		Details
 	}{enrollmentToken, details}
 
 	var registration Registration
-	if _, err := client.do(ctx, pathRegister, "", body, &registration); err != nil {
+	if _, err := client.do(ctx, http.MethodPost, pathRegister, "", body, &registration); err != nil {
 		return nil, err
 	}
 	return &registration, nil
@@ -194,7 +244,7 @@ func (client *Client) Register(ctx context.Context, enrollmentToken string, deta
 func (client *Client) Heartbeat(ctx context.Context, token string, details Details) (*HeartbeatAnswer, error) {
 	details.Name = ""
 	var answer HeartbeatAnswer
-	header, err := client.do(ctx, pathHeartbeat, token, details, &answer)
+	header, err := client.do(ctx, http.MethodPost, pathHeartbeat, token, details, &answer)
 	if err != nil {
 		return nil, err
 	}
@@ -204,11 +254,11 @@ func (client *Client) Heartbeat(ctx context.Context, token string, details Detai
 
 func (client *Client) Rotate(ctx context.Context, token string) (*IssuedCredential, error) {
 	var answer rotation
-	if _, err := client.do(ctx, pathRotate, token, struct{}{}, &answer); err != nil {
+	if _, err := client.do(ctx, http.MethodPost, pathRotate, token, struct{}{}, &answer); err != nil {
 		return nil, err
 	}
 	if answer.Credential.Token == "" {
-		return nil, &Error{Kind: Transient, Path: pathRotate, Status: http.StatusCreated, Code: "missing_credential"}
+		return nil, &Error{Kind: Transient, Method: http.MethodPost, Path: pathRotate, Status: http.StatusCreated, Code: "missing_credential"}
 	}
 	return &answer.Credential, nil
 }
@@ -220,12 +270,30 @@ func (client *Client) SendEvents(ctx context.Context, token string, events []jso
 	}{events}
 
 	var accepted Accepted
-	header, err := client.do(ctx, pathTelemetry, token, body, &accepted)
+	header, err := client.do(ctx, http.MethodPost, pathTelemetry, token, body, &accepted)
 	if err != nil {
 		return nil, err
 	}
 	accepted.ServerTime = serverTime(header)
 	return &accepted, nil
+}
+
+// GetTasks fetches the recovery tasks waiting for this agent: none or one.
+func (client *Client) GetTasks(ctx context.Context, token string) (*Tasks, error) {
+	var tasks Tasks
+	if _, err := client.do(ctx, http.MethodGet, pathTasks, token, nil, &tasks); err != nil {
+		return nil, err
+	}
+	return &tasks, nil
+}
+
+// ReportTask reports one stage of a task and returns the status the platform now holds for it.
+// A refused transition (Conflict) returns that status together with the error.
+func (client *Client) ReportTask(ctx context.Context, token, taskID string, report TaskReport) (string, error) {
+	var answer taskStatus
+	path := pathTasks + "/" + url.PathEscape(taskID) + "/result"
+	_, err := client.do(ctx, http.MethodPost, path, token, report, &answer)
+	return answer.Status, err
 }
 
 type envelope struct {
@@ -235,20 +303,26 @@ type envelope struct {
 	Errors        json.RawMessage `json:"errors"`
 }
 
-func (client *Client) do(ctx context.Context, path, token string, body any, content any) (http.Header, error) {
-	encoded, err := json.Marshal(body)
-	if err != nil {
-		return nil, err
+// do sends one request. A nil body sends none, as GET requests need.
+func (client *Client) do(ctx context.Context, method, path, token string, body any, content any) (http.Header, error) {
+	var sent io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		sent = bytes.NewReader(encoded)
 	}
 
-	endpoint := *client.base
-	endpoint.Path = client.base.Path + path
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(encoded))
+	endpoint := client.base.JoinPath(path)
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), sent)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
 	request.Header.Set("User-Agent", client.userAgent)
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -256,34 +330,38 @@ func (client *Client) do(ctx context.Context, path, token string, body any, cont
 
 	response, err := client.http.Do(request)
 	if err != nil {
-		return nil, &Error{Kind: Transient, Path: path, Err: unwrapURLError(err)}
+		return nil, &Error{Kind: Transient, Method: method, Path: path, Err: unwrapURLError(err)}
 	}
 	defer response.Body.Close()
 
 	raw, err := io.ReadAll(io.LimitReader(response.Body, maxAnswerBytes))
 	if err != nil {
-		return nil, &Error{Kind: Transient, Path: path, Status: response.StatusCode, Err: unwrapURLError(err)}
+		return nil, &Error{Kind: Transient, Method: method, Path: path, Status: response.StatusCode, Err: unwrapURLError(err)}
 	}
 
 	var answer envelope
 	decodeErr := json.Unmarshal(raw, &answer)
 
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		return nil, classify(path, response, answer)
+		if response.StatusCode == http.StatusConflict && content != nil && len(answer.Content) > 0 {
+			_ = json.Unmarshal(answer.Content, content)
+		}
+		return nil, classify(method, path, response, answer)
 	}
 	if decodeErr != nil {
-		return nil, &Error{Kind: Transient, Path: path, Status: response.StatusCode, Code: "invalid_answer", Err: decodeErr}
+		return nil, &Error{Kind: Transient, Method: method, Path: path, Status: response.StatusCode, Code: "invalid_answer", Err: decodeErr}
 	}
 	if content != nil && len(answer.Content) > 0 && string(answer.Content) != "null" {
 		if err := json.Unmarshal(answer.Content, content); err != nil {
-			return nil, &Error{Kind: Transient, Path: path, Status: response.StatusCode, Code: "invalid_answer", Err: err}
+			return nil, &Error{Kind: Transient, Method: method, Path: path, Status: response.StatusCode, Code: "invalid_answer", Err: err}
 		}
 	}
 	return response.Header, nil
 }
 
-func classify(path string, response *http.Response, answer envelope) *Error {
+func classify(method, path string, response *http.Response, answer envelope) *Error {
 	apiError := &Error{
+		Method:     method,
 		Path:       path,
 		Status:     response.StatusCode,
 		Code:       answer.IdenticalCode,
@@ -307,6 +385,10 @@ func classify(path string, response *http.Response, answer envelope) *Error {
 		apiError.Kind = Rejected
 	case response.StatusCode == http.StatusTooManyRequests:
 		apiError.Kind = RateLimited
+	case response.StatusCode == http.StatusNotFound:
+		apiError.Kind = NotFound
+	case response.StatusCode == http.StatusConflict:
+		apiError.Kind = Conflict
 	default:
 		apiError.Kind = Transient
 	}

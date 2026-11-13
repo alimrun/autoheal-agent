@@ -292,3 +292,30 @@ func TestEventSeverityAndBody(t *testing.T) {
 		t.Errorf("host event: %+v", built)
 	}
 }
+
+func TestReporterRecordKeepsTheScheduleInStep(t *testing.T) {
+	start := time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC)
+	reporter := NewReporter(2, 5*time.Minute)
+	reporter.Observe(Result{Status: Down}, start)
+	if !reporter.Observe(Result{Status: Down}, start.Add(time.Second)) {
+		t.Fatal("two down results should be reported")
+	}
+
+	reporter.Record(Up, start.Add(10*time.Second))
+	if reporter.Reported() != Up {
+		t.Fatalf("reported %q after an on-demand up", reporter.Reported())
+	}
+	if reporter.Observe(Result{Status: Up}, start.Add(20*time.Second)) {
+		t.Error("an up result right after an on-demand up is not news")
+	}
+	if !reporter.Observe(Result{Status: Up}, start.Add(10*time.Second+5*time.Minute)) {
+		t.Error("the refresh interval counts from the on-demand result")
+	}
+
+	if reporter.Observe(Result{Status: Down}, start.Add(6*time.Minute)) {
+		t.Error("one down result after an on-demand up still needs confirming")
+	}
+	if !reporter.Observe(Result{Status: Down}, start.Add(7*time.Minute)) {
+		t.Error("the second down result should be reported")
+	}
+}

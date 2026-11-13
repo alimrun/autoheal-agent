@@ -20,19 +20,26 @@ const (
 	Rejected
 	// Unauthenticated means the credential is unknown, expired or revoked.
 	Unauthenticated
-	// Scope means the credential lacks the scope; the agent must be enrolled again.
+	// Scope means the credential lacks the scope. A rotation issues every scope; failing that,
+	// the agent must be enrolled again.
 	Scope
 	// TokenRefused means an enrollment token was expired, cancelled or already used.
 	TokenRefused
+	// NotFound means the platform has no such endpoint or record. Loops that do not expect it
+	// retry it like a transient failure.
+	NotFound
+	// Conflict means the record is in a state that does not allow the request; it must not be resent.
+	Conflict
 )
 
 func (kind Kind) String() string {
-	return [...]string{"transient", "rate_limited", "unavailable", "rejected", "unauthenticated", "scope", "token_refused"}[kind]
+	return [...]string{"transient", "rate_limited", "unavailable", "rejected", "unauthenticated", "scope", "token_refused", "not_found", "conflict"}[kind]
 }
 
 // Error never holds request headers or bodies, so it is safe to log.
 type Error struct {
 	Kind       Kind
+	Method     string
 	Path       string
 	Status     int
 	Code       string
@@ -44,7 +51,7 @@ type Error struct {
 
 func (apiError *Error) Error() string {
 	var builder strings.Builder
-	fmt.Fprintf(&builder, "POST %s", apiError.Path)
+	fmt.Fprintf(&builder, "%s %s", apiError.Method, apiError.Path)
 	if apiError.Status != 0 {
 		fmt.Fprintf(&builder, ": %d", apiError.Status)
 	}

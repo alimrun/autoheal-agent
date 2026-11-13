@@ -1,8 +1,10 @@
 # AutoHeal agent (systemd). Install to /etc/systemd/system/autoheal-agent.service,
 # then: sudo systemctl daemon-reload && sudo systemctl enable --now autoheal-agent
 #
-# The agent only reads host metrics, runs its configured HTTP and TCP checks
-# and sends the results to AutoHeal. It never starts a process.
+# The agent reads host metrics, runs its configured HTTP and TCP checks and
+# sends the results to AutoHeal. With recovery turned on in its configuration
+# it also acts on signed tasks for the two actions declared there: running a
+# check again and calling a loopback cache hook. It never starts a process.
 
 [Unit]
 Description=AutoHeal agent

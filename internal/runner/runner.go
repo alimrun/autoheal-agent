@@ -1,11 +1,13 @@
-// Package runner runs the agent: heartbeats, checks, batching, sending and shutdown.
+// Package runner runs the agent: heartbeats, checks, batching, sending, recovery tasks and shutdown.
 package runner
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,6 +37,12 @@ type Options struct {
 	Refresh           time.Duration
 	QueueSize         int
 	CheckJitter       time.Duration
+	// TaskPoll is the wait between two fetches of recovery tasks.
+	TaskPoll time.Duration
+	// TaskPollUnsupported replaces TaskPoll while the platform has no task endpoint.
+	TaskPollUnsupported time.Duration
+	// TaskReportWindow is how long one task report is retried before it is given up.
+	TaskReportWindow time.Duration
 }
 
 func DefaultOptions() Options {
@@ -54,6 +62,10 @@ func DefaultOptions() Options {
 		Refresh:           5 * time.Minute,
 		QueueSize:         500,
 		CheckJitter:       10 * time.Second,
+
+		TaskPoll:            15 * time.Second,
+		TaskPollUnsupported: 10 * time.Minute,
+		TaskReportWindow:    time.Minute,
 	}
 }
 
@@ -61,6 +73,8 @@ type Sender interface {
 	Heartbeat(ctx context.Context, token string, details api.Details) (*api.HeartbeatAnswer, error)
 	Rotate(ctx context.Context, token string) (*api.IssuedCredential, error)
 	SendEvents(ctx context.Context, token string, events []json.RawMessage) (*api.Accepted, error)
+	GetTasks(ctx context.Context, token string) (*api.Tasks, error)
+	ReportTask(ctx context.Context, token, taskID string, report api.TaskReport) (string, error)
 }
 
 type Deps struct {
@@ -73,6 +87,22 @@ type Deps struct {
 	Spool      *spool.Spool
 	Credential *credential.Credential
 	Stamp      credential.Stamp
+	// Recovery turns the recovery loop on. Nil, the default, means tasks are never asked for.
+	Recovery *Recovery
+}
+
+// scheduled is one check with the reporter its scheduled and on-demand runs share.
+type scheduled struct {
+	check    *check.Check
+	reporter *check.Reporter
+	// running holds one token while the check runs, so its runs never overlap.
+	running chan struct{}
+}
+
+// urgent is an event to save at once, ahead of the flush timer but behind the events already waiting.
+type urgent struct {
+	event event.Event
+	saved chan error
 }
 
 type Runner struct {
@@ -81,15 +111,18 @@ type Runner struct {
 	client   Sender
 	stateDir string
 	details  api.Details
-	checks   []*check.Check
+	checks   []*scheduled
 	spool    *spool.Spool
+	recovery *Recovery
 
 	mu           sync.Mutex
 	credential   *credential.Credential
 	stamp        credential.Stamp
 	refusedToken string
+	rotating     sync.Mutex
 
 	events         chan event.Event
+	urgent         chan urgent
 	wake           chan struct{}
 	droppedReports atomic.Int64
 
@@ -98,17 +131,27 @@ type Runner struct {
 }
 
 func New(deps Deps) *Runner {
+	checks := make([]*scheduled, 0, len(deps.Checks))
+	for _, configured := range deps.Checks {
+		checks = append(checks, &scheduled{
+			check:    configured,
+			reporter: check.NewReporter(deps.Options.Confirm, deps.Options.Refresh),
+			running:  make(chan struct{}, 1),
+		})
+	}
 	return &Runner{
 		options:    deps.Options,
 		log:        deps.Log,
 		client:     deps.Client,
 		stateDir:   deps.StateDir,
 		details:    deps.Details,
-		checks:     deps.Checks,
+		checks:     checks,
 		spool:      deps.Spool,
+		recovery:   deps.Recovery,
 		credential: deps.Credential,
 		stamp:      deps.Stamp,
 		events:     make(chan event.Event, deps.Options.QueueSize),
+		urgent:     make(chan urgent),
 		wake:       make(chan struct{}, 1),
 	}
 }
@@ -121,6 +164,7 @@ func (runner *Runner) Run(ctx context.Context) {
 		"project", runner.credential.Project.Name,
 		"environment", runner.credential.Environment.Name,
 		"checks", len(runner.checks),
+		"recovery", runner.recovery != nil,
 		"spooled_events", runner.spool.Len())
 
 	var producers sync.WaitGroup
@@ -137,6 +181,10 @@ func (runner *Runner) Run(ctx context.Context) {
 	go func() { defer workers.Done(); runner.batch(ctx, &producers) }()
 	go func() { defer workers.Done(); runner.sendLoop(ctx) }()
 	go func() { defer workers.Done(); runner.heartbeatLoop(ctx) }()
+	if runner.recovery != nil {
+		workers.Add(1)
+		go func() { defer workers.Done(); runner.recoveryLoop(ctx) }()
+	}
 
 	<-ctx.Done()
 	workers.Wait()
@@ -168,26 +216,32 @@ func (runner *Runner) sleep(ctx context.Context, wait time.Duration, wake bool) 
 	return true
 }
 
-func (runner *Runner) runCheck(ctx context.Context, configured *check.Check) {
+func (runner *Runner) runCheck(ctx context.Context, configured *scheduled) {
 	if runner.options.CheckJitter > 0 {
-		offset := time.Duration(rand.Int64N(int64(min(configured.Interval, runner.options.CheckJitter))))
+		offset := time.Duration(rand.Int64N(int64(min(configured.check.Interval, runner.options.CheckJitter))))
 		if !runner.sleep(ctx, offset, false) {
 			return
 		}
 	}
 
-	reporter := check.NewReporter(runner.options.Confirm, runner.options.Refresh)
-	ticker := time.NewTicker(configured.Interval)
+	ticker := time.NewTicker(configured.check.Interval)
 	defer ticker.Stop()
 
 	for {
-		result := configured.Run(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case configured.running <- struct{}{}:
+		}
+		result := configured.check.Run(ctx)
+		now := time.Now()
+		send := ctx.Err() == nil && configured.reporter.Observe(result, now)
+		<-configured.running
 		if ctx.Err() != nil {
 			return
 		}
-		now := time.Now()
-		if reporter.Observe(result, now) {
-			runner.report(configured.Event(result, now, runner.details.Version))
+		if send {
+			runner.report(configured.check.Event(result, now, runner.details.Version))
 		}
 
 		select {
@@ -196,6 +250,50 @@ func (runner *Runner) runCheck(ctx context.Context, configured *check.Check) {
 		case <-ticker.C:
 		}
 	}
+}
+
+var (
+	errUnknownCheck    = errors.New("this agent runs no check of that name")
+	errNothingToReport = errors.New("the check has nothing to report yet")
+)
+
+// RunNow runs the named check once, outside its schedule, and saves its event at once: an
+// on-demand result is not held back for a second, confirming one.
+func (runner *Runner) RunNow(ctx context.Context, name string) (check.Status, error) {
+	index := slices.IndexFunc(runner.checks, func(configured *scheduled) bool { return configured.check.Name == name })
+	if index < 0 {
+		return "", errUnknownCheck
+	}
+	configured := runner.checks[index]
+
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case configured.running <- struct{}{}:
+	}
+	result := configured.check.Run(ctx)
+	now := time.Now()
+	if ctx.Err() == nil && !result.Skip {
+		configured.reporter.Record(result.Status, now)
+	}
+	<-configured.running
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if result.Skip {
+		return "", errNothingToReport
+	}
+
+	request := urgent{event: configured.check.Event(result, now, runner.details.Version), saved: make(chan error, 1)}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case runner.urgent <- request:
+	}
+	if err := <-request.saved; err != nil {
+		return "", err
+	}
+	return result.Status, nil
 }
 
 func (runner *Runner) report(built event.Event) {
@@ -213,19 +311,21 @@ func (runner *Runner) batch(ctx context.Context, producers *sync.WaitGroup) {
 	var timer *time.Timer
 	var deadline <-chan time.Time
 
-	flush := func() {
+	flush := func() error {
 		if timer != nil {
 			timer.Stop()
 			timer, deadline = nil, nil
 		}
 		if len(pending) == 0 {
-			return
+			return nil
 		}
-		if err := runner.spool.Append(pending); err != nil {
+		err := runner.spool.Append(pending)
+		if err != nil {
 			runner.log.Error("could not save events to the spool; they are lost", "events", len(pending), "error", err.Error())
 		}
 		pending = nil
 		runner.notify()
+		return err
 	}
 	add := func(built event.Event) {
 		pending = append(pending, built)
@@ -242,6 +342,17 @@ func (runner *Runner) batch(ctx context.Context, producers *sync.WaitGroup) {
 		select {
 		case built := <-runner.events:
 			add(built)
+		case request := <-runner.urgent:
+			for waiting := true; waiting; {
+				select {
+				case built := <-runner.events:
+					add(built)
+				default:
+					waiting = false
+				}
+			}
+			pending = append(pending, request.event)
+			request.saved <- flush()
 		case <-deadline:
 			flush()
 		case <-ctx.Done():
@@ -365,6 +476,13 @@ func (runner *Runner) heartbeatLoop(ctx context.Context) {
 // rotate saves the new credential before using it, so a crash can never strand the agent;
 // until then the old one keeps working through the platform's grace period.
 func (runner *Runner) rotate(ctx context.Context, token string) {
+	// The heartbeat and recovery loops can both ask; the second finds the token already replaced.
+	runner.rotating.Lock()
+	defer runner.rotating.Unlock()
+	if current, _ := runner.currentToken(); current != token {
+		return
+	}
+
 	issued, err := runner.client.Rotate(ctx, token)
 	if err != nil {
 		runner.log.Warn("credential rotation failed; the next heartbeat will try again", "error", err.Error())

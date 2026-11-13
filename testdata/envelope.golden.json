@@ -1,0 +1,10 @@
+{
+    "public_key": "D9diyaanytgGRnwCrLP1Y5+pSvLyJWh9SB9opnPebI4=",
+    "key_id": "golden-1",
+    "payload_json": "{\"protocol\":1,\"task_id\":\"01JCRECOVERYTASK000000000A\",\"nonce\":\"9f86d081884c7d659a2feaa0c55ad015\",\"agent_id\":\"01JCAGENT00000000000000000\",\"environment_id\":\"01JCENVIRONMENT00000000000\",\"action\":\"clear_cache\",\"arguments\":{\"target\":\"views\"},\"policy_version\":3,\"catalog_version\":1,\"verification_check\":\"web-01:listener\",\"timeout_seconds\":60,\"issued_at\":\"2026-11-12T12:00:00Z\",\"expires_at\":\"2026-11-12T12:05:00Z\"}",
+    "envelope": {
+        "key_id": "golden-1",
+        "payload": "eyJwcm90b2NvbCI6MSwidGFza19pZCI6IjAxSkNSRUNPVkVSWVRBU0swMDAwMDAwMDBBIiwibm9uY2UiOiI5Zjg2ZDA4MTg4NGM3ZDY1OWEyZmVhYTBjNTVhZDAxNSIsImFnZW50X2lkIjoiMDFKQ0FHRU5UMDAwMDAwMDAwMDAwMDAwMDAiLCJlbnZpcm9ubWVudF9pZCI6IjAxSkNFTlZJUk9OTUVOVDAwMDAwMDAwMDAwIiwiYWN0aW9uIjoiY2xlYXJfY2FjaGUiLCJhcmd1bWVudHMiOnsidGFyZ2V0Ijoidmlld3MifSwicG9saWN5X3ZlcnNpb24iOjMsImNhdGFsb2dfdmVyc2lvbiI6MSwidmVyaWZpY2F0aW9uX2NoZWNrIjoid2ViLTAxOmxpc3RlbmVyIiwidGltZW91dF9zZWNvbmRzIjo2MCwiaXNzdWVkX2F0IjoiMjAyNi0xMS0xMlQxMjowMDowMFoiLCJleHBpcmVzX2F0IjoiMjAyNi0xMS0xMlQxMjowNTowMFoifQ==",
+        "signature": "qtbSYsMZnsL0fb2FqRgDexmokZzlWAHJez8krlPgfBPwaGAVBHegmdtWAiGK8IT7ay/USgmrG+Gyj2jqK64UDg=="
+    }
+}

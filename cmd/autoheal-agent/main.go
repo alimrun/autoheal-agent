@@ -1,9 +1,12 @@
-// Command autoheal-agent reports a host's heartbeat and health checks to AutoHeal. It never runs commands.
+// Command autoheal-agent reports a host's heartbeat and health checks to AutoHeal. When its
+// configuration turns recovery on, it also acts on signed tasks for the two actions declared
+// there: running a check again and calling a loopback cache hook. It never starts a process.
 package main
 
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"flag"
 	"fmt"
@@ -23,6 +26,7 @@ import (
 	"github.com/alimrun/autoheal-agent/internal/config"
 	"github.com/alimrun/autoheal-agent/internal/credential"
 	"github.com/alimrun/autoheal-agent/internal/event"
+	"github.com/alimrun/autoheal-agent/internal/recovery"
 	"github.com/alimrun/autoheal-agent/internal/runner"
 	"github.com/alimrun/autoheal-agent/internal/spool"
 )
@@ -93,7 +97,7 @@ func validate(env environment, args []string) int {
 		fmt.Fprintln(env.stderr, err)
 		return 1
 	}
-	fmt.Fprintf(env.stdout, "%s is valid: %d checks, host checks %s\n", *path, len(loaded.Checks), onOff(loaded.HostEnabled()))
+	fmt.Fprintf(env.stdout, "%s is valid: %d checks, host checks %s, recovery %s\n", *path, len(loaded.Checks), onOff(loaded.HostEnabled()), onOff(loaded.Recovery.Enabled))
 	return 0
 }
 
@@ -262,6 +266,15 @@ func runAgent(env environment, args []string) int {
 		log.Error("cannot start", "error", err.Error())
 		return 1
 	}
+	details := agentDetails(loaded)
+	tasks, err := buildRecovery(loaded, hostname())
+	if err != nil {
+		log.Error("cannot start", "error", err.Error())
+		return 1
+	}
+	if tasks != nil {
+		details.Recovery = &api.RecoveryCapability{Protocol: recovery.Protocol, Actions: loaded.Recovery.EnabledActions()}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
@@ -271,13 +284,44 @@ func runAgent(env environment, args []string) int {
 		Log:        log,
 		Client:     client,
 		StateDir:   loaded.StateDir,
-		Details:    agentDetails(loaded),
+		Details:    details,
 		Checks:     checks,
 		Spool:      waiting,
 		Credential: saved,
 		Stamp:      stamp,
+		Recovery:   tasks,
 	}).Run(ctx)
 	return 0
+}
+
+// buildRecovery returns nil unless the configuration turns recovery on.
+func buildRecovery(loaded *config.Config, host string) (*runner.Recovery, error) {
+	if !loaded.Recovery.Enabled {
+		return nil, nil
+	}
+
+	keys := map[string]ed25519.PublicKey{}
+	for _, key := range loaded.Recovery.PlatformKeys {
+		keys[key.ID], _ = key.Decode()
+	}
+	policy := recovery.Policy{Prefix: loaded.Prefix(host), Rechecks: loaded.Recovery.Actions.RecheckHealth.Checks}
+	for _, hook := range loaded.Recovery.Actions.ClearCache.Hooks {
+		policy.Hooks = append(policy.Hooks, recovery.Hook{Name: hook.Name, URL: hook.URL, TokenFile: hook.TokenFile, Timeout: hook.Timeout.Duration})
+	}
+
+	replay, err := recovery.OpenReplayStore(loaded.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	roots, err := api.RootCAs(loaded.CAFile)
+	if err != nil {
+		return nil, err
+	}
+	return &runner.Recovery{
+		Verifier: recovery.NewVerifier(keys, policy, replay),
+		Replay:   replay,
+		Registry: recovery.NewRegistry(policy, roots, "autoheal-agent/"+buildinfo.Version+" recovery"),
+	}, nil
 }
 
 func buildChecks(loaded *config.Config, host string) ([]*check.Check, error) {

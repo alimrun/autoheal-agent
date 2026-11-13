@@ -27,7 +27,7 @@ check:
 	if [ -x "$$vulncheck" ]; then "$$vulncheck" ./...; \
 	else echo "govulncheck is not installed; skipped (go install golang.org/x/vuln/cmd/govulncheck@latest)"; fi
 
-# Usage: make release V=0.1.0   (needs a clean tree and the tag v0.1.0 on HEAD)
+# Usage: make release V=0.2.0   (needs a clean tree and the tag v0.2.0 on HEAD)
 release:
 	@if [ -z "$(V)" ]; then echo "usage: make release V=<version>"; exit 2; fi
 	./scripts/release.sh "$(V)"

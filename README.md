@@ -5,8 +5,11 @@
 memory and disk use, runs the HTTP and TCP checks you configure, and sends the
 results to your AutoHeal environment, where a failing check opens an incident.
 
-It never runs commands, never starts a process, and takes no instructions or
-configuration from AutoHeal. See [Security model](#security-model).
+It never runs commands, never starts a process, and takes no configuration
+from AutoHeal. Recovery is off by default. If you turn it on, AutoHeal can ask
+the agent for two actions on targets you declared in its config: run a check
+again, or call a cache hook on the same host. See [Recovery](#8-recovery-optional)
+and the [Security model](#12-security-model).
 
 ```
 autoheal-agent enroll   [--config PATH] [--token-stdin] [--force]
@@ -118,7 +121,8 @@ sudo chmod 0600 /usr/local/var/log/autoheal-agent.log
 Copy the example and edit it. Every setting is described in
 [`packaging/agent.example.yaml`](packaging/agent.example.yaml): the agent's
 name and check prefix, the state folder, an optional extra CA file, the log
-level, the spool limits, the host thresholds, and up to 50 HTTP and TCP checks.
+level, the spool limits, the host thresholds, up to 50 HTTP and TCP checks, and
+the optional recovery section (section 8).
 
 ```bash
 sudo install -m 0644 packaging/agent.example.yaml /etc/autoheal/agent.yaml   # macOS: /usr/local/etc/autoheal/agent.yaml
@@ -203,7 +207,120 @@ heartbeat. Its checks appear as `<host_prefix>:<check name>` (for example
 resolves when the check is up again. An **Update required** marker means this
 version is older than the minimum AutoHeal supports.
 
-## 8. Upgrade
+## 8. Recovery (optional)
+
+From version 0.2.0 the agent can act on recovery tasks. It is **off unless the
+config turns it on**, and an agent with recovery off never asks AutoHeal for
+tasks.
+
+With recovery on, the agent asks AutoHeal for a task every 15 seconds and
+holds one at a time. It can do exactly two things, and only to targets named in
+its own config:
+
+| Action | What the agent does |
+|---|---|
+| `recheck_health` | Runs one of its configured checks once, now, and sends the result as ordinary telemetry. |
+| `clear_cache` | Sends one HTTP `POST` to a cache hook you declared, on the same host. |
+
+Anything else is refused. The agent does not take checks, hook addresses or
+commands from AutoHeal, and it still cannot start a process.
+
+### Key setup
+
+AutoHeal signs every task with an Ed25519 key, and the agent acts only on
+tasks signed by a key listed in its config.
+
+1. On the AutoHeal server, the administrator generates the signing key once:
+   `php artisan recovery:generate-signing-key`. It prints a **key ID** and a
+   **public key** (32 bytes, base64). The secret key stays on the server.
+2. Put both in the agent's config under `recovery.platform_keys`. The public
+   key is not a secret, but get it from your administrator, not from a
+   message you cannot trace.
+3. To rotate the key, list the new key next to the old one on every agent,
+   switch the server to the new key, then remove the old one.
+
+### Turn it on
+
+Add this to the config (the example file has it commented out), then run
+`autoheal-agent validate` and restart the service:
+
+```yaml
+recovery:
+  enabled: true
+  platform_keys:
+    - id: k1
+      public_key: "<base64 Ed25519 public key>"
+  actions:
+    recheck_health:
+      checks: [api]                 # names from `checks:`, or host.cpu, host.memory, host.disk.<name>
+    clear_cache:
+      hooks:
+        - name: views               # the cache name a task will ask for
+          url: "http://127.0.0.1:8080/internal/cache/clear"
+          token_file: /etc/autoheal/hooks/views.token   # optional
+          timeout: 30s              # default 30s, at most 120s
+```
+
+`enabled: true` needs at least one key and at least one action with a target.
+An action with no targets is off. `validate` refuses, with the line number: a
+key that is not 32 bytes of base64, a check name the agent does not run, a hook
+address that is not on this host, and a token file other users can read.
+
+The agent's heartbeat tells AutoHeal which of the two actions are on, never
+the check or hook names. Recovery also has to be turned on in AutoHeal's own
+recovery policy, and the agent's credential needs the `recovery` scope: a
+credential issued before 0.2.0 is rotated once, automatically, to get it.
+
+### The cache hook contract
+
+A hook is an HTTP endpoint **you** provide in your application; what it clears
+is up to you. The agent's side of the contract:
+
+- **Loopback only.** The URL's host must be `localhost`, an address in
+  `127.0.0.0/8` or `::1`. The agent also checks the address it actually
+  connects to, so a name that resolves elsewhere is refused. It uses no proxy.
+- **One `POST`** per task, with `Content-Type: application/json` and the body
+  `{"task_id": "<task ID>"}`. Nothing from AutoHeal other than that ID reaches
+  the hook.
+- **Optional bearer token.** With `token_file` set, the file's content
+  (trimmed) is sent as `Authorization: Bearer <token>`. The file must be
+  readable only by the agent's user:
+
+  ```bash
+  sudo install -d -m 0750 -o root -g autoheal-agent /etc/autoheal/hooks
+  sudo install -m 0600 -o autoheal-agent -g autoheal-agent /dev/null /etc/autoheal/hooks/views.token
+  sudoedit /etc/autoheal/hooks/views.token
+  ```
+
+- **Any 2xx status means finished.** Any other status, including a redirect,
+  means failed. Redirects are never followed.
+- **The answer's body is ignored.** It is not stored, logged or sent to
+  AutoHeal. AutoHeal learns only the status code and how long the call took.
+- **Timeout.** The call stops at the hook's `timeout`, or sooner if the task
+  allows less.
+- **Make it safe to repeat.** A task runs at most once, but AutoHeal may send
+  a new task for the same cache later.
+
+AutoHeal does not take the hook's word, or the agent's, for the result. Once
+AutoHeal has accepted the agent's report that the action finished, the agent
+runs the health check named in the task and sends its result as telemetry;
+AutoHeal decides from that check whether the recovery worked. After a failed
+or refused task the check is not run.
+
+### What the agent checks before acting
+
+Every task must pass all of these, in this order, or it is refused and
+nothing is done: a valid signature from a listed key; protocol version 1; not
+expired, not issued more than 2 minutes ahead of this host's clock, and valid
+for at most 10 minutes; addressed to this agent and its environment; never
+seen before (task IDs are kept in `recovery-seen.json` in the state folder,
+across restarts); an action and target enabled in the local config; and
+arguments holding the target and nothing else.
+
+AutoHeal can pause recovery from the dashboard. While it is paused, the agent
+keeps asking and acts on nothing.
+
+## 9. Upgrade
 
 Upgrade in place; the config, the credential and the spool stay where they are.
 
@@ -223,7 +340,7 @@ Verify the new download first (section 2). Events spooled while the agent was
 stopped are sent when it starts, and the dashboard shows the new version on the
 next heartbeat.
 
-## 9. Uninstall
+## 10. Uninstall
 
 First **revoke the agent in the dashboard** (on the environment's Agents page), so
 its credential stops working even if a copy of it survives. Then:
@@ -246,7 +363,7 @@ sudo dscl . -delete /Users/autoheal-agent
 sudo dscl . -delete /Groups/autoheal-agent
 ```
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 Logs are JSON lines; the `msg` field is quoted below.
 
@@ -258,22 +375,33 @@ Logs are JSON lines; the `msg` field is quoted below.
 | `dropping events too old for AutoHeal to accept` | Spooled events passed 23 hours of age; AutoHeal accepts only the last 24 hours. | Nothing to do; the outage was longer than that. |
 | `AutoHeal refused a batch as invalid; dropping it` | AutoHeal rejected the events (the `fields` show why). Most often the clock is far ahead. | Fix the clock (below). If it is right, report the fields to AutoHeal support. |
 | `this host's clock differs from AutoHeal's; events dated more than 5 minutes ahead are refused` | The local time and AutoHeal's differ by more than 2 minutes. | Enable NTP (`timedatectl set-ntp true`, or System Settings → Date & Time on macOS). |
-| `this agent is older than the minimum version AutoHeal supports; upgrade it` | AutoHeal still accepts this version but asks for an upgrade. Logged at most hourly. | Upgrade (section 8). |
+| `this agent is older than the minimum version AutoHeal supports; upgrade it` | AutoHeal still accepts this version but asks for an upgrade. Logged at most hourly. | Upgrade (section 9). |
 | `sending telemetry failed; events stay in the spool and are retried with backoff` / `heartbeat failed; retrying with backoff` | AutoHeal could not be reached, timed out, or asked the agent to slow down. Retries back off up to 5 minutes. | Check DNS, the firewall and proxy (`HTTPS_PROXY` is honoured), and `ca_file` for an internal CA. `telemetry delivered again` / `heartbeat delivered again` confirm recovery. |
 | `events are arriving faster than they can be saved; dropping results` | The disk holding the state folder is slow or full. | Free disk space on that volume. |
-| `… can be read by other users (mode 0644); run: chmod 600 …` | The state folder or `credential.json` allows group or other access, so the agent refuses it. | Run the `chmod` it prints (`0700` for the folder, `0600` for the file), and keep both owned by `autoheal-agent`. |
+| `… can be read by other users (mode 0644); run: chmod 600 …` | The state folder, `credential.json` or a hook's `token_file` allows group or other access, so the agent refuses it. | Run the `chmod` it prints (`0700` for the folder, `0600` for the files), and keep them owned by `autoheal-agent`. |
+| `refused a recovery task` | A task failed one of the checks in section 8; `reason` names which (`bad_signature`, `unknown_key`, `expired`, `not_enabled`, `replayed`, …). Nothing was done, and AutoHeal was told. | `unknown_key` or `bad_signature`: compare `recovery.platform_keys` with the server's key. `not_enabled`: the target is not declared in this config. `expired` or `not_yet_valid`: fix the clock. |
+| `dropped a recovery task that cannot be reported` | A task was unreadable or badly signed and named no task to report against. Nothing was done. | Compare `recovery.platform_keys` with the server's key. If it persists, report it to AutoHeal support. |
+| `this AutoHeal has no recovery support; asking again at a slower pace` | The server is older than the recovery feature. The agent asks every 10 minutes instead of every 15 seconds. | Nothing to do, or set `recovery.enabled: false`. |
+| `the credential still lacks the recovery scope; …` | The credential was issued without the `recovery` scope and rotating it did not add it. Heartbeats and telemetry are not affected. | Check that recovery is available for this environment, or enroll again with `autoheal-agent enroll --force`. |
+| `AutoHeal paused recovery; no task is acted on until it resumes` | Recovery was paused on the dashboard. | Nothing to do; `AutoHeal resumed recovery` follows when it is lifted. |
+| `recovery task ended` with `stage=failed` | The action ran and failed: `hook_status` (the hook answered outside 2xx, or with a redirect), `hook_error` (it could not be reached, or its token file could not be read), `timeout`, or `check_error`. | Check the hook in your application and its `url`, `token_file` and `timeout`. |
+| `could not run the verification check; AutoHeal will not see a fresh result` | The task named a check this agent does not run (for example after a rename). | Restore the check's name, or resolve the incident by hand. |
 
-## 11. Security model
+## 12. Security model
 
 **What it sends**, only to the AutoHeal API address that issued its credential:
 
 - at enrollment and on each heartbeat: the agent's name, hostname, version,
-  operating system and architecture;
+  operating system and architecture; and, on heartbeats while recovery is on,
+  which of the two recovery actions are enabled (never their targets);
 - check results: the check name and kind, up / degraded / down, the target
   (a sanitized URL, a host and port, or a disk path), the measured percentage
   or latency, a short error detail, and the agent version. URLs in results and logs
   are reduced to scheme, host, port and path; user information, query strings
-  and fragments are dropped.
+  and fragments are dropped;
+- for each recovery task: that it was received, started, and finished, failed
+  or was refused, with a reason code, the duration, the hook's HTTP status or
+  the check's status. Never the hook's address, its token or its answer.
 
 It sends no file contents, process lists, environment variables or logs.
 
@@ -284,13 +412,20 @@ It sends no file contents, process lists, environment variables or logs.
   that starts one (`os.StartProcess`, `os/exec`, `syscall.forkExec`,
   `syscall.Exec`), and a source scan forbids them and any way to skip TLS
   certificate checks.
-- It takes no configuration or instructions from AutoHeal. What it checks is
-  decided only by the local config file; answers from AutoHeal set only the
-  heartbeat interval, credential rotation and the minimum version notice.
+- It takes no configuration from AutoHeal. What it checks, and which hooks
+  exist, is decided only by the local config file. Answers from AutoHeal set
+  only the heartbeat interval, credential rotation and the minimum version
+  notice.
+- With recovery off (the default) it takes no instructions at all and never
+  asks for tasks. With recovery on, the only instructions it accepts are
+  signed tasks for the two actions in section 8, on targets its own config
+  names; every other task is refused. A task cannot carry a command, an
+  address or a check definition: unknown fields are refused.
+- A cache hook is only ever called on a loopback address, without a proxy.
 - It does not follow redirects and always verifies TLS certificates (TLS 1.2 or
   later; your system's CAs plus an optional `ca_file`).
-- It never logs the enrollment token or the credential, and refuses a token
-  passed as a command-line argument.
+- It never logs the enrollment token, the credential or a hook token, and
+  refuses a token passed as a command-line argument.
 
 **Where the credential lives:** `credential.json` in the state folder
 (`/var/lib/autoheal-agent` on Linux, `/usr/local/var/autoheal-agent` on
@@ -309,8 +444,12 @@ Requires Go (see `go.mod`).
 ```bash
 make build      # ./autoheal-agent, version 0.0.0-dev unless HEAD is tagged
 make check      # gofmt, go vet, go test -race (with the no-process build check), govulncheck if installed
-make release V=0.1.0
+make release V=0.2.0
 ```
+
+The version is stamped in at build time from the tag (or `make build
+VERSION=0.2.0`); the source keeps `0.0.0-dev` as the default. Recovery tasks
+arrive with 0.2.0.
 
 `scripts/release.sh <version>` needs a clean tree and the tag `v<version>` on
 `HEAD`. It builds the four targets with `CGO_ENABLED=0 -trimpath`, packs

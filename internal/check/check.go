@@ -152,6 +152,15 @@ func (reporter *Reporter) Observe(result Result, now time.Time) bool {
 	return false
 }
 
+// Record notes a result that was sent outside the schedule, such as an on-demand run, so the
+// scheduled results that follow are compared with it.
+func (reporter *Reporter) Record(status Status, now time.Time) {
+	reporter.reported = status
+	reporter.candidate = status
+	reporter.streak = reporter.Confirm
+	reporter.lastSent = now
+}
+
 // Reported is the last status sent, empty before the first report.
 func (reporter *Reporter) Reported() Status {
 	return reporter.reported
