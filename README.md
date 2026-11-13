@@ -28,41 +28,86 @@ autoheal-agent version
 
 ## Quick install
 
-On the server, with the API address from the environment's **Agents** page:
+On the server, as a user who can `sudo`:
 
 ```bash
-curl -fsSL https://github.com/alimrun/autoheal-agent/releases/latest/download/install.sh | sudo sh -s -- --url https://autoheal.example.com/api/v1
+curl -fsSL https://github.com/alimrun/autoheal-agent/releases/latest/download/install.sh | sudo sh
 ```
 
-When it asks, paste the enrollment token from the dashboard. It is read from
-the terminal with echo off, never from the command line or the environment,
-and never printed. The script then:
+The environment's **Agents** page shows the same command with `--url` already
+filled in. The script asks on the terminal for anything you did not pass:
 
-1. detects Linux or macOS and `amd64` or `arm64`;
-2. downloads the archive and `SHA256SUMS` from the latest release and refuses
-   to install on a checksum mismatch (and, once releases are signed, on a bad
-   minisign signature);
-3. creates the `autoheal-agent` user and the folders with the modes in
-   section 3, installs the binary, and writes a starter config that reports
-   CPU, memory and disk use (an existing config is kept);
-4. enrolls as the service user with `autoheal-agent enroll --token-stdin`;
-5. installs and starts the systemd unit or the launchd daemon.
+1. the API address, ending in `/api/v1`;
+2. the agent's name on the dashboard (the host name by default);
+3. the system user the service runs as (`autoheal-agent` by default);
+4. the enrollment token from the dashboard. It is read with echo off, never
+   from the command line or the environment, never printed, and never written
+   to your shell history.
+
+Before it changes anything it detects the distribution and the architecture
+(`amd64` or `arm64`), checks for curl or wget, tar, a SHA-256 tool, useradd and
+a running systemd (and prints the `apt-get`/`dnf`/`zypper`/`apk` command for
+anything missing), downloads the release and refuses it on a checksum mismatch
+(and, once releases are signed, on a bad minisign signature), then shows what
+it will do and asks `Install? [Y/n]`. It then:
+
+1. creates the service user and the folders with the modes in section 3,
+   installs the binary, and writes a starter config that reports CPU, memory
+   and disk use (an existing config is kept);
+2. enrolls as the service user with `autoheal-agent enroll --token-stdin`;
+3. installs and starts the systemd unit (or the launchd daemon on macOS);
+4. prints a summary and `systemctl status`.
 
 Running it again upgrades the binary and restarts the service, keeping the
-config and the credential. Options:
+config and the credential.
 
-| Option | |
-|---|---|
-| `--url URL` | The API address, ending in `/api/v1`. Required. |
-| `--version X.Y.Z` | Install that release instead of the latest. |
-| `--reenroll` | Ask for a new token and replace the credential (`enroll --force`). |
-| `--token-stdin` | Read the token from standard input, for automation. Only when the script is a downloaded file: `sudo sh install.sh --url … --token-stdin < token-file`. |
-| `--no-start` | Install and enroll, but leave the service stopped. |
-| `--download-base URL` | Fetch the release files from a mirror. |
+### Several projects on one server
+
+One agent reports to one project environment. When a server runs apps for
+several projects, run the same command again with a token from the other
+environment: the script sees the existing agent and offers to add another one
+beside it. Each agent gets a short instance name, its own config, credential
+and service, and they share the binary and the service user:
+
+| Instance | Config | State | Service |
+|---|---|---|---|
+| first (`default`) | `/etc/autoheal/agent.yaml` | `/var/lib/autoheal-agent` | `autoheal-agent` |
+| `billing-prod` | `/etc/autoheal/billing-prod.yaml` | `/var/lib/autoheal-agent-billing-prod` | `autoheal-agent-billing-prod` |
+
+On macOS the paths are under `/usr/local` and the daemon is
+`com.autoheal.agent.<instance>`. Running the script upgrades the binary for all
+of them and restarts them.
+
+### Automation
+
+Without a terminal (Ansible, cloud-init, CI), pass every input as an option,
+`--yes`, and the token on standard input from a file only root can read:
+
+```bash
+sudo sh install.sh --url https://autoheal.example.com/api/v1 --name web-01 --yes --token-stdin < /root/autoheal-token
+```
+
+The script refuses to run without a terminal unless `--url`, `--token-stdin`
+and `--yes` are given. The options can also come from the environment
+(`sudo AUTOHEAL_URL=… AUTOHEAL_YES=1 sh install.sh --token-stdin < file`); the
+token never can.
+
+| Option | Environment | |
+|---|---|---|
+| `--url URL` | `AUTOHEAL_URL` | The API address, ending in `/api/v1`. |
+| `--name NAME` | `AUTOHEAL_AGENT_NAME` | The agent's name on the dashboard, for a new config. Defaults to the host name. |
+| `--user USER` | `AUTOHEAL_SERVICE_USER` | The service user. Defaults to `autoheal-agent`; all agents on a server share it, and root is refused. |
+| `--instance NAME` | `AUTOHEAL_INSTANCE` | Install or upgrade a further agent for another project. |
+| `-y`, `--yes` | `AUTOHEAL_YES=1` | Do not ask to confirm, and take the defaults for the name and the user. |
+| `--token-stdin` | | Read the token from standard input. Only when the script is a downloaded file, not piped from curl. |
+| `--reenroll` | | Ask for a new token and replace the credential (`enroll --force`). |
+| `--version X.Y.Z` | | Install that release instead of the latest. |
+| `--no-start` | | Install and enroll, but leave the service stopped. |
+| `--download-base URL` | | Fetch the release files from a mirror. |
 
 Add your HTTP and TCP checks to the config afterwards (section 4) and restart
 the service. To read the script first, download it, read it, then run
-`sudo sh install.sh --url …`. The sections below are the same steps by hand.
+`sudo sh install.sh`. The sections below are the same steps by hand.
 
 ## 1. Requirements
 

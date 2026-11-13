@@ -5,9 +5,10 @@
 #
 # <dist-dir> is the output of scripts/release.sh. A small stand-in for the
 # AutoHeal API answers enrollment, heartbeats and telemetry on 127.0.0.1. The
-# test installs from the archives, checks the files, users and modes, re-runs
-# the installer to prove it is idempotent, and checks that a tampered archive
-# is refused. It changes the host it runs on, so run it only on a throwaway VM.
+# test installs from the archives with a custom service user, checks the files,
+# users and modes, re-runs the installer to prove it is idempotent, adds a
+# second agent for another project, and checks that a tampered archive, a
+# missing --yes without a terminal and a token argument are refused. It changes the host it runs on, so run it only on a throwaway VM.
 
 set -euo pipefail
 
@@ -88,21 +89,33 @@ chmod 600 "$work/token"
 run_installer() {
 	local log=$1
 	shift
-	sh "$installer" --url "$api" --download-base "file://$dist" --token-stdin "$@" <"$work/token" >"$log" 2>&1
+	sh "$installer" --url "$api" --download-base "file://$dist" --token-stdin --yes "$@" <"$work/token" >"$log" 2>&1
 }
 
-# 1. A fresh install.
-run_installer "$work/first.log" || { cat "$work/first.log"; die "the first install failed"; }
+user=autoheal-ci
+
+# 0. Without a terminal and without --yes, nothing happens.
+if sh "$installer" --url "$api" --download-base "file://$dist" --token-stdin <"$work/token" >"$work/no-yes.log" 2>&1; then
+	die "an install without a terminal or --yes went ahead"
+fi
+grep -q "missing: --yes" "$work/no-yes.log" || { cat "$work/no-yes.log"; die "no message naming --yes"; }
+[ ! -e /usr/local/bin/autoheal-agent ] || die "something was installed without --yes"
+pass "no terminal and no --yes is refused"
+
+# 1. A fresh install, with a service user of our choosing and a name.
+run_installer "$work/first.log" --user "$user" --name ci-web || { cat "$work/first.log"; die "the first install failed"; }
 cat "$work/first.log"
 grep -qF "$token" "$work/first.log" && die "the installer printed the token"
-id autoheal-agent >/dev/null || die "no autoheal-agent user"
+id "$user" >/dev/null || die "no $user user"
 [ "$(stat -c '%a %U' /usr/local/bin/autoheal-agent)" = "755 root" ] || die "binary mode or owner"
-[ "$(stat -c '%a %U' /var/lib/autoheal-agent)" = "700 autoheal-agent" ] || die "state folder mode or owner"
-[ "$(stat -c '%a %U' /var/lib/autoheal-agent/credential.json)" = "600 autoheal-agent" ] || die "credential mode or owner"
-[ -f /etc/autoheal/agent.yaml ] || die "no config"
+[ "$(stat -c '%a %U' /var/lib/autoheal-agent)" = "700 $user" ] || die "state folder mode or owner"
+[ "$(stat -c '%a %U' /var/lib/autoheal-agent/credential.json)" = "600 $user" ] || die "credential mode or owner"
+grep -q '^name: "ci-web"$' /etc/autoheal/agent.yaml || die "the config does not hold the name"
+grep -q "^User=$user\$" /etc/systemd/system/autoheal-agent.service || die "the unit does not run as $user"
 systemctl is-enabled --quiet autoheal-agent || die "service not enabled"
 systemctl is-active --quiet autoheal-agent || die "service not active"
-pass "fresh install: user, modes, config, credential, service"
+grep -q "Active: active" "$work/first.log" || die "the installer did not print the service status"
+pass "fresh install: user, modes, config, credential, service, status"
 
 for _ in $(seq 30); do
 	grep -q heartbeat "$work/seen" && break
@@ -122,12 +135,29 @@ grep -q "^# kept" /etc/autoheal/agent.yaml || die "the second run replaced the c
 systemctl is-active --quiet autoheal-agent || die "service not active after the second run"
 pass "re-run is idempotent"
 
+# 2b. A second agent on the same server, for another project.
+if run_installer "$work/other-user.log" --instance billing --user someone-else; then
+	die "a second agent with another service user was accepted"
+fi
+run_installer "$work/billing.log" --instance billing --name ci-billing || { cat "$work/billing.log"; die "the second agent failed"; }
+cat "$work/billing.log"
+grep -qF "$token" "$work/billing.log" && die "the installer printed the token"
+[ "$(stat -c '%a %U' /var/lib/autoheal-agent-billing)" = "700 $user" ] || die "second state folder mode or owner"
+[ "$(stat -c '%a %U' /var/lib/autoheal-agent-billing/credential.json)" = "600 $user" ] || die "second credential mode or owner"
+grep -q '^name: "ci-billing"$' /etc/autoheal/billing.yaml || die "the second config does not hold the name"
+grep -q "run --config /etc/autoheal/billing.yaml" /etc/systemd/system/autoheal-agent-billing.service || die "the second unit does not use its config"
+systemctl is-active --quiet autoheal-agent-billing || die "the second service is not active"
+systemctl is-active --quiet autoheal-agent || die "the first service stopped"
+[ "$(grep -c register "$work/seen")" -eq 2 ] || die "the second agent did not enroll exactly once"
+grep -q "other agents on this server" "$work/billing.log" || die "the summary does not list the first agent"
+pass "a second agent for another project runs beside the first"
+
 # 3. A tampered archive is refused and nothing is replaced.
 cp -R "$dist" "$work/tampered"
 archive=$(cd "$work/tampered" && ls autoheal-agent_*_linux_"$(dpkg --print-architecture)".tar.gz)
 printf 'x' >>"$work/tampered/$archive"
 binary_before=$(sha256sum /usr/local/bin/autoheal-agent)
-if sh "$installer" --url "$api" --download-base "file://$work/tampered" --token-stdin <"$work/token" >"$work/tampered.log" 2>&1; then
+if sh "$installer" --url "$api" --download-base "file://$work/tampered" --token-stdin --yes <"$work/token" >"$work/tampered.log" 2>&1; then
 	die "a tampered archive was installed"
 fi
 grep -q "checksum mismatch" "$work/tampered.log" || { cat "$work/tampered.log"; die "no checksum message"; }
