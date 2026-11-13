@@ -8,8 +8,8 @@
 # It checks the system and its tools, downloads the release for this platform,
 # checks it against SHA256SUMS (and the minisign signature when the release is
 # signed), shows what it will do and asks before changing anything. It then
-# installs the binary, user, folders, config and service as README sections 3
-# to 6 describe, enrolls, starts the service and prints its status.
+# installs the binary, user, folders, config and service as the manual steps
+# in docs/installation.md describe, enrolls, starts the service and prints its status.
 #
 # One server can report to several projects: run it again with the token of
 # another project's environment and it adds a second agent beside the first,
@@ -240,7 +240,7 @@ main() {
 	fi
 
 	# Each agent on this server is an instance. The first, "default", keeps the
-	# paths README section 3 describes; another project's agent, NAME, uses
+	# paths docs/installation.md describes; another project's agent, NAME, uses
 	# NAME.yaml, its own state folder and its own service.
 	suffix_for() { if [ "$1" != default ]; then echo "-$1"; fi; }
 	config_for() { if [ "$1" = default ]; then echo "$config_dir/agent.yaml"; else echo "$config_dir/$1.yaml"; fi; }
@@ -335,7 +335,7 @@ main() {
 		die "missing tools:$missing. Install the packages$packages, then run this again"
 	fi
 	if [ "$os" = linux ] && [ "$start_service" -eq 1 ] && ! { have systemctl && [ -d /run/systemd/system ]; }; then
-		die "systemd is not running here; install the service yourself (README section 6) and run again with --no-start"
+		die "systemd is not running here; install the service yourself (docs/installation.md, "6. Run as a service") and run again with --no-start"
 	fi
 
 	if have curl; then
@@ -873,7 +873,7 @@ EOF
 	fi
 	printf '\n'
 	say "within a minute it shows as online on the environment's Agents page"
-	say "add HTTP and TCP checks to $config_file (README section 4), then restart the service"
+	say "add HTTP and TCP checks to $config_file (docs/installation.md, "4. Configure"), then restart the service"
 }
 
 main "$@"

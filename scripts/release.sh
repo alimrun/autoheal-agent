@@ -63,11 +63,13 @@ targets=(linux_amd64 linux_arm64 darwin_amd64 darwin_arm64)
 rm -rf -- "${root:?}/dist"
 mkdir -p dist
 
-# Files every archive holds besides the binary. LICENSE and minisign.pub are
-# included once the owner adds them.
+# Files every archive holds besides the binary: the README with its docs and
+# changelog, and LICENSE and minisign.pub once the owner adds them.
 [ -f README.md ] && [ -d packaging ] || die "README.md and packaging/ must exist"
 extras=(README.md packaging)
 [ -f LICENSE ] && extras+=(LICENSE)
+[ -f CHANGELOG.md ] && extras+=(CHANGELOG.md)
+[ -d docs ] && extras+=(docs)
 [ -f minisign.pub ] && extras+=(minisign.pub)
 
 for target in "${targets[@]}"; do
