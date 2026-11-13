@@ -20,10 +20,49 @@ autoheal-agent version
 
 > **Releases are unsigned previews for now.** The release pipeline signs
 > `SHA256SUMS` with [minisign](https://jedisct1.github.io/minisign/), but the
-> release key does not exist yet. Until the product owner creates it with
-> `minisign -G` and commits only its public half as `minisign.pub` at the root
-> of this repository, releases carry checksums but no signature you can check.
-> Once `minisign.pub` is here, verify every download as shown below.
+> release key does not exist yet. Until the product owner creates it and
+> commits only its public half as `minisign.pub` at the root of this
+> repository (see [Releasing](#releasing)), releases carry checksums but no
+> signature you can check. Once `minisign.pub` is here, verify every download
+> as shown below; the install script then checks the signature for you.
+
+## Quick install
+
+On the server, with the API address from the environment's **Agents** page:
+
+```bash
+curl -fsSL https://github.com/alimrun/autoheal-agent/releases/latest/download/install.sh | sudo sh -s -- --url https://autoheal.example.com/api/v1
+```
+
+When it asks, paste the enrollment token from the dashboard. It is read from
+the terminal with echo off, never from the command line or the environment,
+and never printed. The script then:
+
+1. detects Linux or macOS and `amd64` or `arm64`;
+2. downloads the archive and `SHA256SUMS` from the latest release and refuses
+   to install on a checksum mismatch (and, once releases are signed, on a bad
+   minisign signature);
+3. creates the `autoheal-agent` user and the folders with the modes in
+   section 3, installs the binary, and writes a starter config that reports
+   CPU, memory and disk use (an existing config is kept);
+4. enrolls as the service user with `autoheal-agent enroll --token-stdin`;
+5. installs and starts the systemd unit or the launchd daemon.
+
+Running it again upgrades the binary and restarts the service, keeping the
+config and the credential. Options:
+
+| Option | |
+|---|---|
+| `--url URL` | The API address, ending in `/api/v1`. Required. |
+| `--version X.Y.Z` | Install that release instead of the latest. |
+| `--reenroll` | Ask for a new token and replace the credential (`enroll --force`). |
+| `--token-stdin` | Read the token from standard input, for automation. Only when the script is a downloaded file: `sudo sh install.sh --url … --token-stdin < token-file`. |
+| `--no-start` | Install and enroll, but leave the service stopped. |
+| `--download-base URL` | Fetch the release files from a mirror. |
+
+Add your HTTP and TCP checks to the config afterwards (section 4) and restart
+the service. To read the script first, download it, read it, then run
+`sudo sh install.sh --url …`. The sections below are the same steps by hand.
 
 ## 1. Requirements
 
@@ -456,3 +495,31 @@ arrive with 0.2.0.
 reproducible archives into `dist/`, writes `dist/SHA256SUMS`, and signs it with
 the minisign secret key file named by `MINISIGN_SECRET_KEY`. Without that
 variable it stops after the checksums, signs nothing, and exits with status 3.
+
+`scripts/test-install.sh <dist>` installs from those archives on a throwaway
+Linux VM with systemd, against a stand-in API, and checks the result. CI runs
+it on every push.
+
+## Releasing
+
+Pushing a tag `v<version>` runs [`.github/workflows/release.yml`](.github/workflows/release.yml):
+`make check`, shellcheck, `scripts/release.sh`, a checksum (and signature)
+check, the end-to-end install test, and then a GitHub release with the four
+archives, `SHA256SUMS`, `SHA256SUMS.minisig` when signed, and `install.sh`.
+A version with a suffix such as `0.3.0-rc.1` is published as a pre-release,
+which `releases/latest` skips.
+
+```bash
+git tag -a v0.2.0 -m 'autoheal-agent 0.2.0'
+git push origin v0.2.0
+```
+
+To sign releases, once:
+
+1. Create a key without a password, so CI can use it: `minisign -G -W -p minisign.pub -s autoheal-release.key`.
+2. Add the content of `autoheal-release.key` as the repository secret
+   `MINISIGN_SECRET_KEY` (Settings → Secrets and variables → Actions). Keep
+   an offline copy, and never commit it.
+3. Commit `minisign.pub`. From the next tag, the workflow signs `SHA256SUMS`,
+   fails if the secret is missing, and writes the public key into the
+   released `install.sh`, which then refuses unsigned downloads.

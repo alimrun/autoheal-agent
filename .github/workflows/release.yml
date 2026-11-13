@@ -1,0 +1,127 @@
+name: Release
+
+# Pushing a tag v<version> builds, checks, signs (when the key is set) and
+# publishes the release. Add the minisign secret key, created with
+# `minisign -G -W` so it has no password, as the repository secret
+# MINISIGN_SECRET_KEY; commit only minisign.pub.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install release tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq minisign
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Read the version from the tag
+        id: version
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          case $version in *-*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;; *) echo "prerelease=false" >>"$GITHUB_OUTPUT" ;; esac
+
+      - name: make check
+        run: make check
+
+      - name: shellcheck
+        run: shellcheck scripts/install.sh scripts/release.sh scripts/test-install.sh
+
+      - name: Build, checksum and sign
+        id: build
+        env:
+          SIGNING_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -n "$SIGNING_KEY" ]; then
+            key_file="$RUNNER_TEMP/minisign.key"
+            (umask 077 && printf '%s\n' "$SIGNING_KEY" >"$key_file")
+            export MINISIGN_SECRET_KEY="$key_file"
+          fi
+          status=0
+          scripts/release.sh "$VERSION" || status=$?
+          rm -f "$RUNNER_TEMP/minisign.key"
+          case $status in
+          0) echo "signed=true" >>"$GITHUB_OUTPUT" ;;
+          3)
+            if [ -f minisign.pub ]; then
+              echo "::error::minisign.pub is committed but the MINISIGN_SECRET_KEY secret is not set; the installer would refuse an unsigned release"
+              exit 1
+            fi
+            echo "signed=false" >>"$GITHUB_OUTPUT"
+            ;;
+          *) exit "$status" ;;
+          esac
+
+      - name: Prepare install.sh
+        run: |
+          cp scripts/install.sh dist/install.sh
+          if [ -f minisign.pub ]; then
+            key=$(sed -n 2p minisign.pub)
+            case $key in RW*) ;; *) echo "::error::minisign.pub does not hold a key on its second line"; exit 1 ;; esac
+            sed -i "s|^MINISIGN_PUBLIC_KEY=\"\"\$|MINISIGN_PUBLIC_KEY=\"$key\"|" dist/install.sh
+            grep -qx "MINISIGN_PUBLIC_KEY=\"$key\"" dist/install.sh
+          fi
+          chmod 0644 dist/install.sh
+
+      - name: Verify the assets
+        run: |
+          cd dist
+          sha256sum -c SHA256SUMS
+          if [ -f SHA256SUMS.minisig ] && [ -f ../minisign.pub ]; then
+            minisign -Vm SHA256SUMS -p ../minisign.pub
+          fi
+          ./linux_amd64/autoheal-agent version
+
+      - name: Install end to end
+        run: sudo scripts/test-install.sh dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNED: ${{ steps.build.outputs.signed }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+        run: |
+          {
+            echo "autoheal-agent $VERSION."
+            echo
+            echo "Install or upgrade on Linux (systemd) or macOS (launchd):"
+            echo
+            echo '```'
+            echo "curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sudo sh -s -- --url https://<your AutoHeal host>/api/v1"
+            echo '```'
+            echo
+            echo "The script verifies the archive against SHA256SUMS and asks for the enrollment token on the terminal. Manual steps are in the README."
+            if [ "$SIGNED" != true ]; then
+              echo
+              echo "**This release is not signed yet.** It carries checksums but no minisign signature."
+            fi
+          } >"$RUNNER_TEMP/notes.md"
+          files=(dist/autoheal-agent_"${VERSION}"_*.tar.gz dist/SHA256SUMS dist/install.sh)
+          [ -f dist/SHA256SUMS.minisig ] && files+=(dist/SHA256SUMS.minisig)
+          flags=(--verify-tag --title "autoheal-agent $VERSION" --notes-file "$RUNNER_TEMP/notes.md")
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" "${flags[@]}" "${files[@]}"
